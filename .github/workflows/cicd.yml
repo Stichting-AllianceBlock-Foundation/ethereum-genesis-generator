@@ -1,0 +1,114 @@
+name: Build docker image
+
+on:
+    push:
+        branches:
+            - master
+            - electra
+        tags:
+            - '**'
+    workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+env:
+    DOCKER_PASSWORD: ${{ secrets.DH_KEY }}
+    DOCKER_USERNAME: ${{ secrets.DH_ORG }}
+    # Enable self-hosted runners for the sigp repo only.
+    SELF_HOSTED_RUNNERS: ${{ github.repository == 'ethpandaops/ethereum-genesis-generator' }}
+
+jobs:
+    # Extract the VERSION which is either `latest` or `vX.Y.Z`, and the VERSION_SUFFIX
+    # which is either empty or `-unstable`.
+    #
+    # It would be nice if the arch didn't get spliced into the version between `latest` and
+    # `unstable`, but for now we keep the two parts of the version separate for backwards
+    # compatibility.
+    extract-version:
+        runs-on: ubuntu-22.04
+        steps:
+            - name: Extract version
+              run: |
+                    echo "VERSION=${GITHUB_SHA::7}" >> $GITHUB_ENV
+                    echo "VERSION_SUFFIX=" >> $GITHUB_ENV
+            - name: Extract version (if stable)
+              if: github.event.ref == 'refs/heads/stable'
+              run: |
+                    echo "VERSION=latest" >> $GITHUB_ENV
+                    echo "VERSION_SUFFIX=" >> $GITHUB_ENV
+            - name: Extract version (if unstable)
+              if: github.event.ref == 'refs/heads/unstable'
+              run: |
+                    echo "VERSION=latest" >> $GITHUB_ENV
+                    echo "VERSION_SUFFIX=-unstable" >> $GITHUB_ENV
+            - name: Extract version (if tagged release)
+              if: startsWith(github.event.ref, 'refs/tags')
+              run: |
+                    echo "VERSION=$(echo ${GITHUB_REF#refs/tags/})" >> $GITHUB_ENV
+                    echo "VERSION_SUFFIX=" >> $GITHUB_ENV
+        outputs:
+            VERSION: ${{ env.VERSION }}
+            VERSION_SUFFIX: ${{ env.VERSION_SUFFIX }}
+    build-docker-single-arch:
+        name: build-docker-${{ matrix.binary }}-${{ matrix.cpu_arch }}${{ matrix.features.version_suffix }}
+        # Use self-hosted runners only on the sigp repo.
+        runs-on: ${{ github.repository == 'sigp/lighthouse' && fromJson('["self-hosted", "linux", "release"]') || 'ubuntu-22.04'  }}
+        strategy:
+            matrix:
+                binary:   [ethereum-genesis-generator]
+                cpu_arch: [linux/arm64]
+                include:
+                    - profile: maxperf
+
+        needs: [extract-version]
+        env:
+            VERSION: ${{ needs.extract-version.outputs.VERSION }}
+            VERSION_SUFFIX: ${{ needs.extract-version.outputs.VERSION_SUFFIX }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Configure AWS credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-ecr-role
+                aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+            - name: Login to AWS ECR
+              id: login-ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            - name: Install QEMU
+              if: env.SELF_HOSTED_RUNNERS == 'false'
+              run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+            - name: Set up Docker Buildx
+              if: env.SELF_HOSTED_RUNNERS == 'false'
+              uses: docker/setup-buildx-action@v3
+
+            - name: Build and push (Lighthouse)
+              id: docker_build
+              if: startsWith(matrix.binary, 'lighthouse')
+              uses: docker/build-push-action@v5
+              with:
+                file: Dockerfile
+                context: '.'
+                platforms: ${{ matrix.cpu_arch }}
+                push: true
+                tags: |
+                  ${{ steps.login-ecr.outputs.registry }}/${{ matrix.binary }}:${{ env.VERSION }}-${{ env.SHORT_ARCH }}${{ env.VERSION_SUFFIX }}
+
+            - name: Image digest & tags
+              shell: bash
+              run: |
+                cat << EOF
+                digest: ${{ steps.docker_build.outputs.digest }}
+                tags:
+                  ${{ steps.login-ecr.outputs.registry }}/${{ matrix.binary }}:${{ env.VERSION }}-${{ env.SHORT_ARCH }}${{ env.VERSION_SUFFIX }}
+                EOF
