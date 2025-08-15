@@ -83,6 +83,8 @@ ETH1_FOLLOW_DISTANCE: $ETH1_FOLLOW_DISTANCE
 
 # Validator cycle
 # ---------------------------------------------------------------
+MAX_EFFECTIVE_BALANCE: $MAX_EFFECTIVE_BALANCE  
+MIN_ACTIVATION_BALANCE: $MIN_ACTIVATION_BALANCE
 # 2**2 (= 4)
 INACTIVITY_SCORE_BIAS: 4
 # 2**4 (= 16)
